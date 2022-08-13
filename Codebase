@@ -1,0 +1,104 @@
+with signup as (
+  select
+    distinct id,phone_number, -- effectively a user_id
+    min(date_joined::date) as min_time -- gets the earliest Visit for each person
+  from accounts_user
+  group by 1
+  having min(date_joined::date) between {{start}} and {{end}} -- selects people whose first visit is in this time range
+),
+ otp_stage as (
+ 
+ SELECT distinct min_time,phone_number,signup.id
+        FROM communication_communicationlogs
+        INNER JOIN signup on cast('{'||signup.phone_number||'}' as varchar) = cast(communication_communicationlogs.recipients as varchar)
+                                    and min_time::date = communication_communicationlogs.delivered_datetime::date
+                                    and communication_type = 6 and category is null
+ ),
+ 
+ security_pin as (
+        SELECT distinct min_time, accounts_user.id
+        FROM accounts_user
+        INNER JOIN otp_stage on otp_stage.id = accounts_user.id
+        and min_time::date = accounts_user.date_joined::date
+        where password not in ('','!')
+        ),
+identity_screen as (
+        SELECT distinct min_time, accounts_user.id
+        FROM accounts_user
+        INNER JOIN security_pin on security_pin.id = accounts_user.id
+        and min_time::date = accounts_user.date_joined::date
+        where  last_name <> ''
+        ),
+   kyc_validated as (
+        SELECT distinct min_time, accounts_kycfield.user_id as id
+        FROM accounts_kycfield
+        INNER JOIN identity_screen on identity_screen.id = accounts_kycfield.user_id
+        --and min_time::date = accounts_user.date_joined::date
+        where  accounts_kycfield.validated = true
+        ),
+        select_bank as (
+        SELECT distinct min_time, accounts_user.id
+        FROM accounts_user
+        INNER JOIN kyc_validated on kyc_validated.id = accounts_user.id
+        and min_time::date = accounts_user.date_joined::date
+        where  account_number <> ''
+        ),
+        basic_info as (
+        SELECT distinct min_time, accounts_user.id
+        FROM accounts_user
+        INNER JOIN select_bank on select_bank.id = accounts_user.id
+        and min_time::date = accounts_user.date_joined::date
+        where  marital_status is not null
+        ),
+        loan_application as (
+        SELECT distinct min_time, loan_loan.user_id as id
+        FROM loan_loan
+        INNER JOIN basic_info on basic_info.id = loan_loan.user_id
+        and min_time::date = loan_loan.application_datetime::date
+        ),
+        selfie as (
+        SELECT distinct min_time, accounts_kycdocument.user_id as id
+        FROM accounts_kycdocument
+        INNER JOIN loan_application on loan_application.id = accounts_kycdocument.user_id
+        and min_time::date = accounts_kycdocument.created_datetime::date
+        ),
+        
+        loan_approved as (
+        SELECT distinct min_time, loan_loan.user_id as id
+        FROM loan_loan
+        INNER JOIN selfie on selfie.id = loan_loan.user_id
+        and min_time::date = loan_loan.approval_datetime::date
+        ),
+        
+        steps as (
+        
+select '1-Signup' as step, COUNT(id) from signup
+  union 
+select '2-OTP' as step, COUNT(id) from otp_stage
+union 
+select '3-Security_pin' as step, COUNT(id) from security_pin
+union 
+select '4-identity_screen' as step, COUNT(id) from identity_screen
+union 
+select '5-kyc_validated' as step, COUNT(id) from kyc_validated
+union 
+select '6-select_bank' as step, COUNT(id) from select_bank
+union 
+select '7-basic_info' as step, COUNT(id) from basic_info
+union 
+select '8-loan_application' as step, COUNT(id) from loan_application
+union 
+select '9-selfie' as step, COUNT(id) from selfie
+union 
+select '10-loan_approved' as step, COUNT(id) from loan_approved
+order by count desc )
+
+
+select
+  step,
+  count,
+  --lag(count, 1) over (),
+  lag(count, 1) over ()-count as dropped,
+((1.0 - count::numeric/lag(count, 1) over ()))*100::float8 as drop_off
+
+from steps
